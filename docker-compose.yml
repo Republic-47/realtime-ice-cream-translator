@@ -1,0 +1,17 @@
+services:
+  ice-cream-translator:
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+    container_name: ice_cream_container
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/workspace/models/cache
+      - VLLM_USE_V1=1
+      - TOKENIZERS_PARALLELISM=true
+    volumes:
+      - "./models:/workspace/models"
+      - "./app:/workspace/app"
+    ports:
+      - "8889:8888"
