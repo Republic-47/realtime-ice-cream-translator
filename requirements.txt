@@ -1,0 +1,12 @@
+torchcodec
+transformers
+torchaudio
+sentencepiece
+accelerate
+scipy
+fastapi
+uvicorn
+jupyter
+soundfile
+protobuf
+gradio
