@@ -1,7 +1,7 @@
 services:
   ice-cream-translator:
     build:
-      context: .
+      context: ./server
       dockerfile: Dockerfile
     container_name: ice_cream_container
     deploy:
@@ -14,12 +14,6 @@ services:
     environment:
       - HF_HOME=/workspace/models/cache
       - TOKENIZERS_PARALLELISM=true
-    volumes:
-      - "./models:/workspace/models"
-      - "./app:/workspace/app"
-      - "./data:/workspace/data"
     ports:
-      - "8889:8888"
       - "8000:8000"
-      - "7860:7860"
     ipc: host

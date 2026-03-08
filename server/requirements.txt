@@ -1,6 +1,4 @@
-torchcodec
 transformers
-torchaudio
 sentencepiece
 accelerate
 scipy

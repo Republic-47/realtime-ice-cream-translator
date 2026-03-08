@@ -58,10 +58,11 @@ class TranslatorApp:
     def capture_worker(self):
         try:
             sources = get_audio_sources()
-            for chunk in capture_and_chunk(audio_source=sources[0]["id"]):
-                if not self.is_capturing.is_set():
-                    break
+            # ПЕРЕДАЕМ stop_event=self.is_capturing
+            for chunk in capture_and_chunk(audio_source=sources[0]["id"], stop_event=self.is_capturing):
                 self.chunk_queue.put(chunk)
+                
+            self.root.after(0, lambda: self.status_label.config(text="Готов к работе", foreground="green"))
         except Exception as e:
             print(f"Ошибка захвата: {e}")
             self.is_capturing.clear()
