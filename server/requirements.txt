@@ -1,10 +1,10 @@
-transformers
-sentencepiece
-accelerate
-scipy
 fastapi
 uvicorn
-jupyter
+python-multipart
+faster-whisper
+transformers
+accelerate
+torchaudio
 soundfile
-protobuf
-gradio
+numpy
+scipy
