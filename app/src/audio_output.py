@@ -1,12 +1,16 @@
+# app/src/audio_output.py
 import io
 import soundfile as sf
 import soundcard as sc
 from src.config import TARGET_VOLUME_PERCENT
 
+def get_output_devices():
+    """Возвращает список доступных устройств вывода (динамиков/наушников)."""
+    speakers = sc.all_speakers()
+    return [{"id": str(s.id), "name": s.name} for s in speakers]
+
 def _mute_system():
-    # Отложенный импорт (выполнится только в момент перевода)
     from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
-    
     sessions = AudioUtilities.GetAllSessions()
     original_volumes = {}
     for session in sessions:
@@ -18,9 +22,7 @@ def _mute_system():
     return original_volumes
 
 def _unmute_system(original_volumes):
-    # Отложенный импорт
     from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
-    
     sessions = AudioUtilities.GetAllSessions()
     for session in sessions:
         volume = session._ctl.QueryInterface(ISimpleAudioVolume)
@@ -28,29 +30,25 @@ def _unmute_system(original_volumes):
         if process and process.name() in original_volumes:
             volume.SetMasterVolume(original_volumes[process.name()], None)
 
-def play_translated_audio(audio_bytes):
-    """Приглушает систему, проигрывает перевод и возвращает громкость обратно."""
-    
-    # 1. Задаем режим MTA (0) для фонового потока
+def play_translated_audio(audio_bytes, output_device_id=None):
     import sys
-    sys.coinit_flags = 0 
-    
-    # 2. Только теперь импортируем comtypes
+    sys.coinit_flags = 0
     import comtypes
-    
-    # 3. Инициализируем COM-интерфейс для текущего фонового потока
+
     try:
         comtypes.CoInitializeEx(0)
     except Exception:
-        pass # Игнорируем, если soundcard уже сделал это за нас
-        
-    default_speaker = sc.default_speaker()
+        pass
+
+    if output_device_id:
+        speaker = sc.get_speaker(id=output_device_id)
+    else:
+        speaker = sc.default_speaker()
+
     data, fs = sf.read(io.BytesIO(audio_bytes))
-    
+
     original_vols = _mute_system()
     try:
-        default_speaker.play(data, samplerate=fs)
+        speaker.play(data, samplerate=fs)
     finally:
         _unmute_system(original_vols)
-        # Мы намеренно не вызываем CoUninitialize(), 
-        # чтобы не выбить почву из-под ног у библиотеки soundcard

@@ -1,3 +1,4 @@
+proc-tap[hq-resample]
 soundcard
 soundfile
 numpy

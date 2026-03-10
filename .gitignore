@@ -1,5 +1,4 @@
-*/__pycache__/*
-.venv
-.app/.venv
+*__pycache__*
+*.venv*
 models/
 data/
