@@ -18,4 +18,6 @@ services:
       - OMP_NUM_THREADS=4
     ports:
       - "8000:8000"
+    volumes:
+      - ./server/main.py:/workspace/main.py
     ipc: host
