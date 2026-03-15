@@ -4,6 +4,7 @@ services:
       context: ./server
       dockerfile: Dockerfile
     container_name: ice_cream_container
+    shm_size: '8gb'
     deploy:
       resources:
         reservations:
@@ -14,6 +15,7 @@ services:
     environment:
       - HF_HOME=/workspace/models/cache
       - TOKENIZERS_PARALLELISM=true
+      - OMP_NUM_THREADS=4
     ports:
       - "8000:8000"
     ipc: host

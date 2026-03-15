@@ -1,6 +1,18 @@
-import torch
-from transformers import AutoProcessor, SeamlessM4Tv2Model
+import os
+from huggingface_hub import snapshot_download
 
-MODEL_ID = "facebook/seamless-m4t-v2-large"
-AutoProcessor.from_pretrained(MODEL_ID)
-SeamlessM4Tv2Model.from_pretrained(MODEL_ID, torch_dtype=torch.float16)
+os.environ["TORCH_HOME"] = "/workspace/models"
+os.environ["HF_HOME"] = "/workspace/models"
+
+def download():
+    print("1. Скачивание Qwen3-ASR (0.6B)...")
+    snapshot_download("Qwen/Qwen3-ASR-0.6B")
+
+    print("2. Скачивание Qwen3.5 MT (2B)...")
+    snapshot_download("Qwen/Qwen3.5-2B")
+
+    print("3. Скачивание Qwen3-TTS (0.6B Base для клонирования голоса)...")
+    snapshot_download("Qwen/Qwen3-TTS-12Hz-0.6B-Base")
+
+if __name__ == "__main__":
+    download()
