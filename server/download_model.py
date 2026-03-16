@@ -11,8 +11,5 @@ def download():
     print("2. Скачивание Qwen3.5 MT (2B)...")
     snapshot_download("Qwen/Qwen3.5-2B")
 
-    print("3. Скачивание Qwen3-TTS (0.6B Base для клонирования голоса)...")
-    snapshot_download("Qwen/Qwen3-TTS-12Hz-0.6B-Base")
-
 if __name__ == "__main__":
     download()

@@ -10,3 +10,4 @@ sox
 onnxruntime
 soynlp
 daggr
+httpx

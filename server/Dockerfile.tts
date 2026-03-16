@@ -1,0 +1,13 @@
+FROM epicurien03/cosyvoice3-runpod:v3-fixed
+
+RUN pip install --no-cache-dir fastapi uvicorn httpx modelscope
+
+RUN python3 -c "from modelscope import snapshot_download; snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='/opt/cv3_model')"
+
+WORKDIR /workspace
+
+COPY tts_server.py /workspace/tts_server.py
+
+EXPOSE 8001
+
+CMD ["python3", "-m", "uvicorn", "tts_server:app", "--host", "0.0.0.0", "--port", "8001"]

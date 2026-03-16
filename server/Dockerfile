@@ -31,8 +31,6 @@ RUN pip install --no-cache-dir vllm
 
 RUN pip install --no-cache-dir transformers accelerate einops
 RUN pip install --no-cache-dir qwen-asr --ignore-installed blinker
-RUN pip install --no-cache-dir --no-deps qwen-tts
-
 RUN pip install --no-cache-dir flash-attn --no-build-isolation
 
 COPY requirements.txt .

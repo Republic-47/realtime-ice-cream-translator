@@ -1,9 +1,9 @@
 services:
-  ice-cream-translator:
+  main_service:
     build:
       context: ./server
       dockerfile: Dockerfile
-    container_name: ice_cream_container
+    container_name: asr_mt_container
     shm_size: '8gb'
     deploy:
       resources:
@@ -20,4 +20,28 @@ services:
       - "8000:8000"
     volumes:
       - ./server/main.py:/workspace/main.py
+    ipc: host
+    depends_on:
+      - tts_service
+
+  tts_service:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.tts
+    container_name: cosyvoice_container
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    environment:
+      - OMP_NUM_THREADS=4
+    ports:
+      - "8001:8001"
+    volumes:
+      # ИСПРАВЛЕНО: было /app/tts_server.py
+      - ./server/tts_server.py:/workspace/tts_server.py
     ipc: host
