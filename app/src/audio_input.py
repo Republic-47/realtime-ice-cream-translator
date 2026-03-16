@@ -31,8 +31,8 @@ vad_iterator = VADIterator(
 )
 
 # --- НАСТРОЙКИ СКОЛЬЗЯЩЕГО ОКНА ---
-CHUNK_SECONDS = 5.0        # Ловим по 3 секунды
-OVERLAP_SECONDS = 2.0      # Оставляем 1 секунду контекста (нахлест)
+CHUNK_SECONDS = 7        # Ловим по 3 секунды
+OVERLAP_SECONDS = 1.0      # Оставляем 1 секунду контекста (нахлест)
 
 # Считаем сэмплы в ОРИГИНАЛЬНОЙ частоте (48000)
 CHUNK_SAMPLES_48K = int(CHUNK_SECONDS * 48000)
