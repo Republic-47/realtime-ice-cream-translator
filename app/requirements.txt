@@ -1,0 +1,12 @@
+proc-tap[hq-resample]
+soundcard
+soundfile
+numpy
+requests
+torch
+torchaudio
+pycaw
+comtypes
+packaging
+websockets
+audiotsm

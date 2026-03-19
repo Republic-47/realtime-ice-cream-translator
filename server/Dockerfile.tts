@@ -1,0 +1,18 @@
+FROM pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
+
+RUN apt-get update && apt-get install -y libsndfile1 sox libsox-fmt-all git && rm -rf /var/lib/apt/lists/*
+
+# Ставим новую библиотеку faster-qwen3-tts
+RUN pip install --no-cache-dir fastapi uvicorn websockets soundfile huggingface_hub "faster-qwen3-tts" sox
+
+ENV HF_HOME=/models
+
+# Скачиваем веса 0.6B модели Qwen3-TTS
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base')"
+
+WORKDIR /workspace
+COPY tts_server.py /workspace/tts_server.py
+
+EXPOSE 8001
+
+CMD ["uvicorn", "tts_server:app", "--host", "0.0.0.0", "--port", "8001"]
