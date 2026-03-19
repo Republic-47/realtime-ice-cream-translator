@@ -8,3 +8,4 @@ torchaudio
 pycaw
 comtypes
 packaging
+websockets

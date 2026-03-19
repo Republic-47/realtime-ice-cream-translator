@@ -1,9 +1,10 @@
 services:
-  main_service:
+  # 1. Слой распознавания речи
+  asr_service:
     build:
       context: ./server
-      dockerfile: Dockerfile
-    container_name: asr_mt_container
+      dockerfile: Dockerfile.asr
+    container_name: asr_container
     shm_size: '8gb'
     deploy:
       resources:
@@ -13,22 +14,45 @@ services:
               count: all
               capabilities: [gpu, compute, utility]
     environment:
-      - HF_HOME=/workspace/models/cache
+      - MT_WS_URL=ws://mt_service:8002/mt_stream
       - TOKENIZERS_PARALLELISM=true
       - OMP_NUM_THREADS=4
     ports:
       - "8000:8000"
     volumes:
-      - ./server/main.py:/workspace/main.py
+      - ./server/asr_server.py:/workspace/asr_server.py
     ipc: host
-    depends_on:
-      - tts_service
 
+  # 2. Слой перевода текста
+  mt_service:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.mt
+    container_name: mt_container
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    environment:
+      - TTS_WS_URL=ws://tts_service:8001/tts_stream
+      - TOKENIZERS_PARALLELISM=true
+      - OMP_NUM_THREADS=4
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./server/mt_server.py:/workspace/mt_server.py
+    ipc: host
+
+  # 3. Слой генерации голоса
   tts_service:
     build:
       context: ./server
       dockerfile: Dockerfile.tts
-    container_name: cosyvoice_container
+    container_name: tts_container
     shm_size: '8gb'
     deploy:
       resources:
@@ -42,6 +66,5 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      # ИСПРАВЛЕНО: было /app/tts_server.py
       - ./server/tts_server.py:/workspace/tts_server.py
     ipc: host

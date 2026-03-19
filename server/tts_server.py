@@ -1,78 +1,142 @@
 import os
-import sys
-import uuid
+import io
+import json
+import asyncio
+import threading
+import queue
 import torch
-import torchaudio
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import Response
+import soundfile as sf
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-sys.path.append('/app/CosyVoice')
-sys.path.append('/app/CosyVoice/third_party/Matcha-TTS')
-
-from cosyvoice.cli.cosyvoice import AutoModel
+from qwen_tts import Qwen3TTSModel
 
 tts_model = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tts_model
-    print("🚀 Подъем CosyVoice 3.0...")
+    print("🚀 Подъем Qwen3-TTS (12Hz-0.6B-CustomVoice)...")
 
-    model_path = "/opt/cv3_model"
-
-    if not os.path.exists(model_path):
-        raise RuntimeError(f"❌ Модель не найдена по пути: {model_path}")
-
-    tts_model = AutoModel(model_dir=model_path, fp16=True)
-
+    # Лимит памяти для TTS (~5.1 ГБ из 16 ГБ), чтобы оставить место для ASR и MT
     if torch.cuda.is_available():
-        for attr in ['flow', 'hift']:
-            if hasattr(tts_model, attr):
-                getattr(tts_model, attr).half()
+        torch.cuda.set_per_process_memory_fraction(0.32, device=0)
 
-    print("✅ TTS Сервер CosyVoice 3.0 готов!")
+    # Загружаем 0.6B модель с оптимизацией SDPA
+    tts_model = Qwen3TTSModel.from_pretrained(
+        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        device_map="cuda:0",
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+    )
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post("/tts")
-async def generate_tts(
-    text: str = Form(...),
-    # prompt_text больше не обязателен, если используем cross_lingual
-    prompt_wav: UploadFile = File(...)
-):
-    temp_wav = f"temp_prompt_{uuid.uuid4().hex}.wav"
-    out_wav = f"out_{uuid.uuid4().hex}.wav"
+def inference_worker(text: str, target_lang: str, speaker: str, out_queue: queue.Queue):
+    """
+    Синхронный воркер генерации речи.
+    Работает в отдельном потоке, чтобы не блокировать асинхронный Event Loop.
+    """
+    try:
+        print(f"⚙️ Воркер: синтез '{text}' на языке {target_lang} (голос: {speaker})")
+
+        # Генерируем аудио массив через Qwen3-TTS
+        wavs, sr = tts_model.generate_custom_voice(
+            text=text,
+            language=target_lang,
+            speaker=speaker,
+            instruct=""
+        )
+
+        # Отправляем готовый numpy массив и sample rate в очередь
+        out_queue.put((wavs[0], sr))
+    except Exception as e:
+        print(f"❌ Ошибка генерации: {e}")
+    finally:
+        # Сигнал, что генерация этого куска завершена
+        out_queue.put(None)
+
+@app.websocket("/tts_stream")
+async def tts_stream_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    gpu_lock = asyncio.Lock()
+
+    # Дефолтные настройки сессии (будут перезаписаны командами от клиента)
+    current_lang = "Russian"
+    current_speaker = "Serena"
 
     try:
-        with open(temp_wav, "wb") as f:
-            f.write(await prompt_wav.read())
+        print("⏳ Ожидание сообщений от MT-сервера (переводчика)...")
 
-        print(f"🎤 Синтез: {text}")
+        while True:
+            # Читаем "сырое" сообщение (может быть как dict с текстом, так и с байтами)
+            message = await websocket.receive()
 
-        # ТОЧНО по документации V3 для cross_lingual (как в примере с японским)
-        # 1. Системный промпт "You are a helpful assistant."
-        # 2. Разделитель "<|endofprompt|>"
-        # 3. Наш русский текст
-        combined_prompt = f"You are a helpful assistant.<|endofprompt|>{text}"
+            # 1. Если прилетели стартовые байты-пустышки от клиента — просто игнорируем
+            if "bytes" in message:
+                continue
 
-        outputs = tts_model.inference_cross_lingual(combined_prompt, temp_wav, stream=False)
+            # 2. Если прилетел текст (JSON команды)
+            elif "text" in message:
+                try:
+                    msg = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    continue
 
-        full_audio = [chunk['tts_speech'] for chunk in outputs]
-        audio_tensor = torch.cat(full_audio, dim=1)
+                # Команда на закрытие соединения
+                if msg.get("action") == "close":
+                    break
 
-        torchaudio.save(out_wav, audio_tensor, tts_model.sample_rate)
+                # Обработка смены языка от клиента
+                if msg.get("action") == "set_lang":
+                    # Клиент (через config.py) присылает язык с большой буквы, как нужно Qwen
+                    current_lang = msg.get("lang", "Russian")
+                    print(f"🌍 Установлен целевой язык: {current_lang}")
+                    continue
 
-        with open(out_wav, "rb") as f:
-            out_bytes = f.read()
+                # Обработка смены голоса от клиента
+                if msg.get("action") == "set_voice":
+                    current_speaker = msg.get("voice", "Serena")
+                    print(f"🗣 Установлен голос диктора: {current_speaker}")
+                    continue
 
-        return Response(content=out_bytes, media_type="audio/wav")
+                # Обработка текста для перевода (приходит от MT сервера)
+                text = msg.get("text", "").strip()
+                if msg.get("action") == "synthesize" and text:
+                    print(f"🎤 Начинаю синтез Qwen3: {text}")
+
+                    # Блокируем доступ, чтобы видеокарта не сошла с ума от параллельных запросов
+                    async with gpu_lock:
+                        audio_queue = queue.Queue()
+
+                        # Запускаем воркер в фоне
+                        threading.Thread(
+                            target=inference_worker,
+                            args=(text, current_lang, current_speaker, audio_queue),
+                            daemon=True
+                        ).start()
+
+                        # Вычитываем результат
+                        while True:
+                            result = await asyncio.to_thread(audio_queue.get)
+
+                            if result is None:
+                                break # Воркер закончил работу
+
+                            wav_data, sr = result
+
+                            # Пакуем numpy-массив в WAV формат для клиента
+                            byte_io = io.BytesIO()
+                            sf.write(byte_io, wav_data, sr, format="WAV")
+
+                            # Отправляем бинарный звук обратно по цепочке
+                            await websocket.send_bytes(byte_io.getvalue())
+
+                        # Сообщаем клиенту, что фраза полностью озвучена
+                        await websocket.send_json({"event": "chunk_done"})
+
+    except WebSocketDisconnect:
+        print("🔌 MT-сервер отключился от TTS.")
     except Exception as e:
-        print(f"❌ Ошибка TTS: {e}")
-        return Response(status_code=500, content=str(e))
-    finally:
-        if os.path.exists(temp_wav): os.remove(temp_wav)
-        if os.path.exists(out_wav): os.remove(out_wav)
+        print(f"❌ Непредвиденная ошибка вебсокета TTS: {e}")

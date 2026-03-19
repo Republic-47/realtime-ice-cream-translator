@@ -1,6 +1,4 @@
-# app/src/audio_input.py
 import os
-import time
 import torch
 import torchaudio
 import numpy as np
@@ -8,7 +6,7 @@ import comtypes
 
 from pycaw.pycaw import AudioUtilities
 from proctap import ProcessAudioCapture
-from src.config import SAMPLE_RATE, VAD_THRESHOLD
+from src.config import SAMPLE_RATE, VAD_THRESHOLD, MAX_PHRASE_SECONDS
 
 os.environ["TORCH_HOME"] = "C:/torch"
 
@@ -21,22 +19,17 @@ model_vad, utils = torch.hub.load(
 
 (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
 
-# Делаем VAD более "чутким"
 vad_iterator = VADIterator(
     model_vad,
     threshold=VAD_THRESHOLD,
-    sampling_rate=SAMPLE_RATE, # 16000
-    min_silence_duration_ms=300, # Ждем всего 300мс тишины для быстрой реакции
+    sampling_rate=SAMPLE_RATE,
+    min_silence_duration_ms=600,
     speech_pad_ms=100
 )
 
-# --- НАСТРОЙКИ СКОЛЬЗЯЩЕГО ОКНА ---
-CHUNK_SECONDS = 7        # Ловим по 3 секунды
-OVERLAP_SECONDS = 1.0      # Оставляем 1 секунду контекста (нахлест)
-
-# Считаем сэмплы в ОРИГИНАЛЬНОЙ частоте (48000)
+# --- НАСТРОЙКИ СТРИМИНГА ---
+CHUNK_SECONDS = 0.5
 CHUNK_SAMPLES_48K = int(CHUNK_SECONDS * 48000)
-OVERLAP_SAMPLES_48K = int(OVERLAP_SECONDS * 48000)
 
 resampler = torchaudio.transforms.Resample(orig_freq=48000, new_freq=SAMPLE_RATE)
 
@@ -58,16 +51,15 @@ def get_audio_processes():
     return processes
 
 def capture_and_chunk(target_pid, stop_event=None):
-    print(f"🎧 Начинаем перехват звука у PID: {target_pid} (Чанки по {CHUNK_SECONDS}с)")
+    print(f"🎧 Начинаем потоковый перехват PID: {target_pid}")
 
     tap = ProcessAudioCapture(pid=target_pid)
     tap.start()
 
     is_recording = False
-
-    # Буферы держим в 48kHz для сохранения качества
     internal_buffer_48k = np.array([], dtype=np.float32)
     speech_buffer_48k = np.array([], dtype=np.float32)
+    current_phrase_samples = 0
 
     try:
         while True:
@@ -78,7 +70,6 @@ def capture_and_chunk(target_pid, stop_event=None):
             if not raw_bytes:
                 continue
 
-            # 1. Читаем float32 и делаем Моно
             audio_data = np.frombuffer(raw_bytes, dtype=np.float32)
             try:
                 audio_data = audio_data.reshape(-1, 2)
@@ -88,12 +79,10 @@ def capture_and_chunk(target_pid, stop_event=None):
 
             internal_buffer_48k = np.concatenate((internal_buffer_48k, mono_48k))
 
-            # 512 семплов при 16kHz == 1536 семплов при 48kHz
             while len(internal_buffer_48k) >= 1536:
                 frame_48k = internal_buffer_48k[:1536]
                 internal_buffer_48k = internal_buffer_48k[1536:]
 
-                # Грубый срез [::3] нужен ТОЛЬКО для детектора речи (ему неважно качество)
                 frame_16k_rough = frame_48k[::3]
                 tensor_vad = torch.from_numpy(frame_16k_rough)
 
@@ -102,40 +91,48 @@ def capture_and_chunk(target_pid, stop_event=None):
                 except Exception:
                     continue
 
-                if speech_dict:
-                    if "start" in speech_dict and not is_recording:
-                        is_recording = True
-                        speech_buffer_48k = frame_48k
-                        print("🎤 Речь пошла")
+                # 1. Ловим начало речи
+                if speech_dict and "start" in speech_dict and not is_recording:
+                    is_recording = True
+                    print("🎤 Спикер начал говорить...")
 
-                    elif "end" in speech_dict and is_recording:
-                        speech_buffer_48k = np.concatenate((speech_buffer_48k, frame_48k))
-                        is_recording = False
+                # 2. Если пишем речь - накапливаем и отправляем
+                if is_recording:
+                    speech_buffer_48k = np.concatenate((speech_buffer_48k, frame_48k))
+                    current_phrase_samples += len(frame_48k)
 
-                        # Если фраза длиннее 0.3 сек
-                        if len(speech_buffer_48k) > int(0.3 * 48000):
-                            # РЕСЕМПЛИНГ ЦЕЛОЙ ФРАЗЫ БЕЗ ШВОВ И АРТЕФАКТОВ
+                    # Стримим куски по 500мс
+                    if len(speech_buffer_48k) >= CHUNK_SAMPLES_48K:
+                        chunk_to_send = speech_buffer_48k[:CHUNK_SAMPLES_48K]
+                        speech_buffer_48k = speech_buffer_48k[CHUNK_SAMPLES_48K:]
+
+                        tensor_48k = torch.from_numpy(chunk_to_send)
+                        tensor_16k = resampler(tensor_48k)
+                        yield tensor_16k.numpy()
+
+                    # 3. Проверяем условия завершения (Пауза от VAD или Лимит времени)
+                    hit_silence = bool(speech_dict and "end" in speech_dict)
+                    hit_limit = bool(current_phrase_samples >= MAX_PHRASE_SECONDS * 48000)
+
+                    if hit_silence or hit_limit:
+                        reason = "тишина" if hit_silence else f"лимит {MAX_PHRASE_SECONDS}с"
+                        print(f"🛑 Конец фразы ({reason}). Отправка на перевод.")
+
+                        # Сливаем остатки буфера перед завершением фразы
+                        if len(speech_buffer_48k) > 0:
                             tensor_48k = torch.from_numpy(speech_buffer_48k)
                             tensor_16k = resampler(tensor_48k)
                             yield tensor_16k.numpy()
-                            print("✅ Фраза закончена (пауза)")
 
+                        # Даем команду серверу на перевод
+                        yield {"event": "phrase_end"}
+
+                        # Полный сброс состояния
                         speech_buffer_48k = np.array([], dtype=np.float32)
+                        current_phrase_samples = 0
+                        is_recording = False
                         vad_iterator.reset_states()
 
-                elif is_recording:
-                    speech_buffer_48k = np.concatenate((speech_buffer_48k, frame_48k))
-
-                    # === ЛОГИКА НАХЛЕСТА ===
-                    if len(speech_buffer_48k) >= CHUNK_SAMPLES_48K:
-                        # РЕСЕМПЛИНГ БОЛЬШОГО ЧАНКА
-                        tensor_48k = torch.from_numpy(speech_buffer_48k)
-                        tensor_16k = resampler(tensor_48k)
-                        yield tensor_16k.numpy()
-                        print(f"🔄 Отправлен чанк {CHUNK_SECONDS}с (работает нахлест)")
-
-                        # Оставляем конец фразы для следующего куска
-                        speech_buffer_48k = speech_buffer_48k[-OVERLAP_SAMPLES_48K:]
     finally:
         try:
             tap.stop()

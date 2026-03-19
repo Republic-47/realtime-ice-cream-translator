@@ -1,13 +1,19 @@
-FROM epicurien03/cosyvoice3-runpod:v3-fixed
+ARG ANACONDA_PYTHON_VERSION=3.12
 
-RUN pip install --no-cache-dir fastapi uvicorn httpx modelscope
+FROM pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
 
-RUN python3 -c "from modelscope import snapshot_download; snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='/opt/cv3_model')"
+RUN apt-get update && apt-get install -y sox libsox-fmt-all git && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir fastapi uvicorn websockets soundfile huggingface_hub sox "qwen-tts"
+
+RUN pip install -U flash-attn --no-build-isolation
+
+ENV HF_HOME=/models
+
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice')"
 
 WORKDIR /workspace
-
 COPY tts_server.py /workspace/tts_server.py
 
 EXPOSE 8001
-
-CMD ["python3", "-m", "uvicorn", "tts_server:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["uvicorn", "tts_server:app", "--host", "0.0.0.0", "--port", "8001"]

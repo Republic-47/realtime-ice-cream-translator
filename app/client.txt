@@ -1,0 +1,495 @@
+# app.py
+```python
+import tkinter as tk
+from tkinter import ttk
+import threading
+import queue
+
+from src.audio_input import capture_and_chunk, get_audio_processes
+from src.audio_output import StreamingPlayer, get_output_devices
+from src.network import TranslationStreamClient
+from src.config import SUPPORTED_LANGUAGES, SERVER_URL
+
+class TranslatorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Ice Cream Translator (Streaming Mode)")
+        self.root.geometry("450x380")
+
+        self.is_capturing = threading.Event()
+        self.target_lang_code = "rus"
+
+        self.output_devices = get_output_devices()
+        self.available_processes = []
+
+        # Объекты стриминга (создаются при старте)
+        self.stream_client = None
+        self.stream_player = None
+
+        self.setup_ui()
+        self.refresh_processes()
+
+    def setup_ui(self):
+        main_frame = ttk.Frame(self.root, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        proc_frame = ttk.Frame(main_frame)
+        proc_frame.pack(fill=tk.X, pady=(0, 15))
+
+        ttk.Label(proc_frame, text="Откуда переводить (Окно):").pack(anchor=tk.W)
+        self.proc_var = tk.StringVar()
+        self.proc_combo = ttk.Combobox(proc_frame, textvariable=self.proc_var, state="readonly")
+        self.proc_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+        self.refresh_btn = ttk.Button(proc_frame, text="🔄 Обновить", command=self.refresh_processes, width=10)
+        self.refresh_btn.pack(side=tk.RIGHT)
+
+        ttk.Label(main_frame, text="Куда выводить перевод:").pack(anchor=tk.W)
+        self.output_var = tk.StringVar()
+        self.output_combo = ttk.Combobox(main_frame, textvariable=self.output_var, values=[d["name"] for d in self.output_devices], state="readonly")
+        if self.output_devices:
+            self.output_combo.current(0)
+        self.output_combo.pack(fill=tk.X, pady=(0, 15))
+
+        ttk.Label(main_frame, text="Целевой язык:").pack(anchor=tk.W)
+        self.lang_var = tk.StringVar(value="Русский")
+        self.lang_combo = ttk.Combobox(main_frame, textvariable=self.lang_var, values=list(SUPPORTED_LANGUAGES.keys()), state="readonly")
+        self.lang_combo.pack(fill=tk.X, pady=(0, 20))
+        self.lang_combo.bind("<<ComboboxSelected>>", lambda e: setattr(self, 'target_lang_code', SUPPORTED_LANGUAGES[self.lang_var.get()]))
+
+        self.capture_btn = ttk.Button(main_frame, text="▶ Начать реалтайм перевод", command=self.toggle_capture)
+        self.capture_btn.pack(fill=tk.X, pady=(0, 15), ipady=10)
+
+        self.status_label = ttk.Label(main_frame, text="Готов к работе", foreground="green")
+        self.status_label.pack(side=tk.BOTTOM)
+
+    def refresh_processes(self):
+        self.available_processes = get_audio_processes()
+        if self.available_processes:
+            self.proc_combo['values'] = [p["name"] for p in self.available_processes]
+            self.proc_combo.current(0)
+        else:
+            self.proc_combo['values'] = ["Аудиопроцессы не найдены"]
+            self.proc_combo.current(0)
+
+    def toggle_capture(self):
+        if not self.is_capturing.is_set():
+            selected_proc_name = self.proc_var.get()
+            target_pid = next((p["pid"] for p in self.available_processes if p["name"] == selected_proc_name), None)
+
+            if not target_pid:
+                self.status_label.config(text="Ошибка: выберите процесс!", foreground="red")
+                return
+
+            self.is_capturing.set()
+
+            # 1. Создаем свежие очереди для потоков
+            self.chunk_queue = queue.Queue()
+            self.playback_queue = queue.Queue()
+
+            output_name = self.output_var.get()
+            output_id = next((d["id"] for d in self.output_devices if d["name"] == output_name), None)
+
+            # 2. Инициализируем и запускаем плеер и сетевой клиент
+            self.stream_player = StreamingPlayer(self.playback_queue, output_device_id=output_id)
+            self.stream_client = TranslationStreamClient(
+                uri=SERVER_URL,
+                target_lang=self.target_lang_code,
+                chunk_queue=self.chunk_queue,
+                playback_queue=self.playback_queue
+            )
+
+            self.stream_player.start()
+            self.stream_client.start()
+
+            self.capture_btn.config(text="⏹ Остановить")
+            self.status_label.config(text=f"Слушаю {selected_proc_name} (Streaming)...", foreground="orange")
+
+            # 3. Запускаем захват звука
+            threading.Thread(target=self.capture_worker, args=(target_pid,), daemon=True).start()
+        else:
+            # Остановка всех потоков
+            self.is_capturing.clear()
+
+            if self.stream_client:
+                self.stream_client.stop()
+            if self.stream_player:
+                self.stream_player.stop()
+
+            self.capture_btn.config(text="▶ Начать реалтайм перевод")
+            self.status_label.config(text="Остановлено", foreground="green")
+
+    def capture_worker(self, target_pid):
+        try:
+            for chunk in capture_and_chunk(target_pid, stop_event=self.is_capturing):
+                self.chunk_queue.put(chunk)
+
+            self.root.after(0, lambda: self.status_label.config(text="Готов к работе", foreground="green"))
+        except Exception as e:
+            print(f"Ошибка захвата: {e}")
+            self.is_capturing.clear()
+            self.root.after(0, lambda: self.status_label.config(text="Ошибка захвата", foreground="red"))
+            self.root.after(0, lambda: self.capture_btn.config(text="▶ Начать реалтайм перевод"))
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TranslatorApp(root)
+    root.mainloop()
+```
+
+# audio_input.py
+```python
+import os
+import torch
+import torchaudio
+import numpy as np
+import comtypes
+
+from pycaw.pycaw import AudioUtilities
+from proctap import ProcessAudioCapture
+from src.config import SAMPLE_RATE, VAD_THRESHOLD
+
+os.environ["TORCH_HOME"] = "C:/torch"
+
+# --- Инициализация VAD ---
+model_vad, utils = torch.hub.load(
+    "snakers4/silero-vad",
+    "silero_vad",
+    trust_repo=True
+)
+
+(get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
+
+vad_iterator = VADIterator(
+    model_vad,
+    threshold=VAD_THRESHOLD,
+    sampling_rate=SAMPLE_RATE,
+    min_silence_duration_ms=600, # Ждем 600мс тишины, чтобы точно понять, что фраза окончена
+    speech_pad_ms=100
+)
+
+# --- НАСТРОЙКИ СТРИМИНГА ---
+CHUNK_SECONDS = 0.5 # Режем строго по полсекунды
+CHUNK_SAMPLES_48K = int(CHUNK_SECONDS * 48000)
+
+resampler = torchaudio.transforms.Resample(orig_freq=48000, new_freq=SAMPLE_RATE)
+
+def get_audio_processes():
+    # Эта часть остается без изменений, она отлично работает
+    try:
+        comtypes.CoInitializeEx(0)
+    except Exception:
+        pass
+
+    sessions = AudioUtilities.GetAllSessions()
+    processes = []
+    seen_pids = set()
+    for session in sessions:
+        process = session.Process
+        if process and process.pid not in seen_pids:
+            if "python" not in process.name().lower() and process.name() != "Idle":
+                processes.append({"pid": process.pid, "name": f"{process.name()} (PID: {process.pid})"})
+                seen_pids.add(process.pid)
+    return processes
+
+def capture_and_chunk(target_pid, stop_event=None):
+    print(f"🎧 Начинаем потоковый перехват PID: {target_pid}")
+
+    tap = ProcessAudioCapture(pid=target_pid)
+    tap.start()
+
+    is_recording = False
+    internal_buffer_48k = np.array([], dtype=np.float32)
+    speech_buffer_48k = np.array([], dtype=np.float32)
+
+    try:
+        while True:
+            if stop_event and not stop_event.is_set():
+                break
+
+            raw_bytes = tap.read(timeout=0.05)
+            if not raw_bytes:
+                continue
+
+            audio_data = np.frombuffer(raw_bytes, dtype=np.float32)
+            try:
+                audio_data = audio_data.reshape(-1, 2)
+            except ValueError:
+                continue
+            mono_48k = audio_data.mean(axis=1)
+
+            internal_buffer_48k = np.concatenate((internal_buffer_48k, mono_48k))
+
+            # Кормим VAD маленькими фреймами
+            while len(internal_buffer_48k) >= 1536:
+                frame_48k = internal_buffer_48k[:1536]
+                internal_buffer_48k = internal_buffer_48k[1536:]
+
+                frame_16k_rough = frame_48k[::3]
+                tensor_vad = torch.from_numpy(frame_16k_rough)
+
+                try:
+                    speech_dict = vad_iterator(tensor_vad, return_seconds=False)
+                except Exception:
+                    continue
+
+                if speech_dict:
+                    if "start" in speech_dict and not is_recording:
+                        is_recording = True
+                        print("🎤 Спикер начал говорить...")
+
+                    elif "end" in speech_dict and is_recording:
+                        is_recording = False
+
+                        # Если остался хвост звука - отдаем его
+                        if len(speech_buffer_48k) > 0:
+                            tensor_48k = torch.from_numpy(speech_buffer_48k)
+                            tensor_16k = resampler(tensor_48k)
+                            yield tensor_16k.numpy()
+
+                        # СИГНАЛ: Фраза закончена, можно запускать перевод!
+                        print("🛑 Пауза. Отправка сигнала конца фразы.")
+                        yield {"event": "phrase_end"}
+
+                        speech_buffer_48k = np.array([], dtype=np.float32)
+                        vad_iterator.reset_states()
+
+                elif is_recording:
+                    speech_buffer_48k = np.concatenate((speech_buffer_48k, frame_48k))
+
+                    # Как только накопили ровно 500мс - сразу откидываем в очередь (стримим)
+                    if len(speech_buffer_48k) >= CHUNK_SAMPLES_48K:
+                        chunk_to_send = speech_buffer_48k[:CHUNK_SAMPLES_48K]
+                        speech_buffer_48k = speech_buffer_48k[CHUNK_SAMPLES_48K:] # Сохраняем излишек
+
+                        tensor_48k = torch.from_numpy(chunk_to_send)
+                        tensor_16k = resampler(tensor_48k)
+                        yield tensor_16k.numpy()
+
+    finally:
+        try:
+            tap.stop()
+            tap.close()
+        except Exception:
+            pass
+        print("⏹ Перехват остановлен.")
+```
+
+# audio_output.py
+```python
+import io
+import threading
+import soundfile as sf
+import soundcard as sc
+from src.config import TARGET_VOLUME_PERCENT
+
+def get_output_devices():
+    """Возвращает список доступных устройств вывода."""
+    speakers = sc.all_speakers()
+    return [{"id": str(s.id), "name": s.name} for s in speakers]
+
+def _mute_system():
+    # Эта магия Windows остается как была
+    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+    sessions = AudioUtilities.GetAllSessions()
+    original_volumes = {}
+    for session in sessions:
+        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+        process = session.Process
+        if process and "python" not in process.name().lower():
+            original_volumes[process.name()] = volume.GetMasterVolume()
+            volume.SetMasterVolume(TARGET_VOLUME_PERCENT, None)
+    return original_volumes
+
+def _unmute_system(original_volumes):
+    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+    sessions = AudioUtilities.GetAllSessions()
+    for session in sessions:
+        volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+        process = session.Process
+        if process and process.name() in original_volumes:
+            volume.SetMasterVolume(original_volumes[process.name()], None)
+
+class StreamingPlayer:
+    """
+    Непрерывно читает байты из очереди и воспроизводит их в открытом аудиопотоке.
+    """
+    def __init__(self, playback_queue, output_device_id=None):
+        self.playback_queue = playback_queue
+        self.output_device_id = output_device_id
+        self.is_playing = False
+        self.thread = None
+        self.original_vols = {}
+
+    def start(self):
+        self.is_playing = True
+        self.original_vols = _mute_system()
+        self.thread = threading.Thread(target=self._play_loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.is_playing = False
+        self.playback_queue.put(None) # Проталкиваем пустышку, чтобы разблокировать очередь
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        _unmute_system(self.original_vols)
+
+    def _play_loop(self):
+        import sys
+        sys.coinit_flags = 0
+        import comtypes
+        try:
+            comtypes.CoInitializeEx(0)
+        except Exception:
+            pass
+
+        speaker = sc.get_speaker(id=self.output_device_id) if self.output_device_id else sc.default_speaker()
+        player = None
+
+        try:
+            while self.is_playing:
+                # Ждем следующий кусок аудио от сети
+                chunk_bytes = self.playback_queue.get()
+                if chunk_bytes is None:
+                    break
+
+                try:
+                    # Декодируем WAV байты в numpy массив
+                    data, fs = sf.read(io.BytesIO(chunk_bytes))
+
+                    # Открываем поток только один раз при получении первого чанка
+                    if player is None:
+                        player = speaker.player(samplerate=fs)
+                        player.__enter__()
+
+                    # Воспроизводим бесшовно
+                    player.play(data)
+                except Exception as e:
+                    print(f"Ошибка воспроизведения куска: {e}")
+                finally:
+                    self.playback_queue.task_done()
+        finally:
+            if player:
+                player.__exit__(None, None, None)
+```
+
+# config.py
+```python
+SERVER_URL = "ws://localhost:8000/translate_stream"
+SAMPLE_RATE = 16000
+MAX_PHRASE_SECONDS = 15
+VAD_THRESHOLD = 0.5
+TARGET_VOLUME_PERCENT = 0.15
+
+SUPPORTED_LANGUAGES = {
+    "Русский": "russian",
+    "Английский": "english",
+    "Китайский": "chinese",
+    "Испанский": "spanish",
+    "Французский": "french",
+    "Немецкий": "german",
+    "Японский": "japanese",
+    "Корейский": "korean",
+    "Итальянский": "italian",
+    "Португальский": "portuguese"
+}
+```
+
+# network.py
+```python
+import io
+import json
+import asyncio
+import threading
+import soundfile as sf
+import websockets
+from src.config import SERVER_URL, SAMPLE_RATE
+
+class TranslationStreamClient:
+    def __init__(self, uri, target_lang, chunk_queue, playback_queue):
+        # Умная замена: перестраховываемся от задвоения
+        base_uri = uri.replace("http://", "ws://").replace("https://", "wss://")
+        if base_uri.endswith("/translate"):
+            base_uri = base_uri.replace("/translate", "/translate_stream")
+
+        self.uri = base_uri
+        self.target_lang = target_lang
+        self.chunk_queue = chunk_queue
+        self.playback_queue = playback_queue
+
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._start_loop, daemon=True)
+        self.is_running = False
+
+    def _start_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self._run())
+
+    def start(self):
+        self.is_running = True
+        self.thread.start()
+
+    def stop(self):
+        self.is_running = False
+        # Кладём пустышку, чтобы разблокировать очередь
+        self.chunk_queue.put(None)
+
+    async def _run(self):
+        try:
+            async with websockets.connect(self.uri) as websocket:
+                print("🔗 Подключено к стриминг-серверу перевода.")
+
+                # 1. Отправляем стартовый prompt_wav для клонирования голоса
+                # Если у тебя есть готовый сэмпл голоса, можно прочитать его.
+                # Для теста генерируем пустую тишину (или можно записать первые 3 сек).
+                dummy_io = io.BytesIO()
+                sf.write(dummy_io, [0.0]*16000, SAMPLE_RATE, format='WAV')
+                await websocket.send(dummy_io.getvalue())
+
+                # 2. Устанавливаем язык
+                await websocket.send(json.dumps({"action": "set_lang", "lang": self.target_lang}))
+
+                # Запускаем две параллельные задачи: чтение и запись
+                task_rx = asyncio.create_task(self._receive_handler(websocket))
+                task_tx = asyncio.create_task(self._send_handler(websocket))
+
+                await asyncio.gather(task_rx, task_tx)
+        except Exception as e:
+            print(f"❌ Ошибка сетевого клиента: {e}")
+
+    async def _receive_handler(self, websocket):
+        """Слушает входящие переведенные байты от TTS и кидает их в плеер"""
+        try:
+            while self.is_running:
+                message = await websocket.recv()
+                if isinstance(message, bytes):
+                    # Прилетело аудио, отдаем на воспроизведение!
+                    self.playback_queue.put(message)
+        except websockets.exceptions.ConnectionClosed:
+            print("Соединение закрыто сервером.")
+        except Exception as e:
+            print(f"Ошибка приема: {e}")
+
+    async def _send_handler(self, websocket):
+        """Слушает микрофон и кидает 500мс чанки на сервер ASR"""
+        try:
+            while self.is_running:
+                # Ждем данные из очереди (асинхронно, чтобы не блокировать loop)
+                item = await self.loop.run_in_executor(None, self.chunk_queue.get)
+
+                if item is None:
+                    break
+
+                if isinstance(item, dict) and item.get("event") == "phrase_end":
+                    # Это сигнал от VAD, что человек замолчал
+                    await websocket.send(json.dumps(item))
+                else:
+                    # Это numpy массив аудио (500мс)
+                    byte_io = io.BytesIO()
+                    sf.write(byte_io, item, SAMPLE_RATE, format='WAV')
+                    await websocket.send(byte_io.getvalue())
+
+                self.chunk_queue.task_done()
+        except Exception as e:
+            print(f"Ошибка отправки: {e}")
+```

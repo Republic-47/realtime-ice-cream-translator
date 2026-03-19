@@ -1,40 +1,40 @@
-# app/app.py
 import tkinter as tk
 from tkinter import ttk
 import threading
 import queue
 
 from src.audio_input import capture_and_chunk, get_audio_processes
-from src.audio_output import play_translated_audio, get_output_devices
-from src.network import translate_chunk
-from src.config import SUPPORTED_LANGUAGES
+from src.audio_output import StreamingPlayer, get_output_devices
+from src.network import TranslationStreamClient
+from src.config import SUPPORTED_LANGUAGES, SUPPORTED_VOICES, SERVER_URL
 
 class TranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Ice Cream Translator")
+        self.root.title("Ice Cream Translator (Streaming Mode)")
         self.root.geometry("450x380")
 
+        self.is_capturing = threading.Event()
+        self.target_lang_code = "Russian"
+        self.target_voice_code = "Serena"
+
+        self.output_devices = []
+        self.available_processes = []
+
+        self.stream_client = None
+        self.stream_player = None
+
+        # Очереди инициализируем сразу, чтобы можно было менять настройки до старта перехвата
         self.chunk_queue = queue.Queue()
         self.playback_queue = queue.Queue()
 
-        self.is_capturing = threading.Event()
-        self.target_lang_code = "rus"
-
-        self.output_devices = get_output_devices()
-        self.available_processes = []
-
         self.setup_ui()
         self.refresh_processes()
-
-        threading.Thread(target=self.sending_worker, daemon=True).start()
-        threading.Thread(target=self.playback_worker, daemon=True).start()
 
     def setup_ui(self):
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Выбор приложения для захвата
         proc_frame = ttk.Frame(main_frame)
         proc_frame.pack(fill=tk.X, pady=(0, 15))
 
@@ -46,28 +46,31 @@ class TranslatorApp:
         self.refresh_btn = ttk.Button(proc_frame, text="🔄 Обновить", command=self.refresh_processes, width=10)
         self.refresh_btn.pack(side=tk.RIGHT)
 
-        # Выбор выхода
         ttk.Label(main_frame, text="Куда выводить перевод:").pack(anchor=tk.W)
         self.output_var = tk.StringVar()
-        self.output_combo = ttk.Combobox(main_frame, textvariable=self.output_var, values=[d["name"] for d in self.output_devices], state="readonly")
-        if self.output_devices:
-            self.output_combo.current(0)
+        self.output_combo = ttk.Combobox(main_frame, textvariable=self.output_var, state="readonly")
         self.output_combo.pack(fill=tk.X, pady=(0, 15))
 
-        # Выбор языка
         ttk.Label(main_frame, text="Целевой язык:").pack(anchor=tk.W)
         self.lang_var = tk.StringVar(value="Русский")
         self.lang_combo = ttk.Combobox(main_frame, textvariable=self.lang_var, values=list(SUPPORTED_LANGUAGES.keys()), state="readonly")
         self.lang_combo.pack(fill=tk.X, pady=(0, 20))
-        self.lang_combo.bind("<<ComboboxSelected>>", lambda e: setattr(self, 'target_lang_code', SUPPORTED_LANGUAGES[self.lang_var.get()]))
+        self.lang_combo.bind("<<ComboboxSelected>>", self.on_lang_changed)
 
-        self.capture_btn = ttk.Button(main_frame, text="▶ Начать перевод", command=self.toggle_capture)
+        ttk.Label(main_frame, text="Голос озвучки:").pack(anchor=tk.W)
+        self.voice_var = tk.StringVar(value="Serena (Теплый, мягкий женский)")
+        self.voice_combo = ttk.Combobox(main_frame, textvariable=self.voice_var, values=list(SUPPORTED_VOICES.keys()), state="readonly")
+        self.voice_combo.pack(fill=tk.X, pady=(0, 20))
+        self.voice_combo.bind("<<ComboboxSelected>>", self.on_voice_changed)
+
+        self.capture_btn = ttk.Button(main_frame, text="▶ Начать реалтайм перевод", command=self.toggle_capture)
         self.capture_btn.pack(fill=tk.X, pady=(0, 15), ipady=10)
 
         self.status_label = ttk.Label(main_frame, text="Готов к работе", foreground="green")
         self.status_label.pack(side=tk.BOTTOM)
 
     def refresh_processes(self):
+        # 1. Обновляем аудио-процессы
         self.available_processes = get_audio_processes()
         if self.available_processes:
             self.proc_combo['values'] = [p["name"] for p in self.available_processes]
@@ -75,6 +78,26 @@ class TranslatorApp:
         else:
             self.proc_combo['values'] = ["Аудиопроцессы не найдены"]
             self.proc_combo.current(0)
+
+        # 2. ИСПРАВЛЕНИЕ: Обновляем устройства вывода
+        self.output_devices = get_output_devices()
+        if self.output_devices:
+            self.output_combo['values'] = [d["name"] for d in self.output_devices]
+            self.output_combo.current(0)
+        else:
+            self.output_combo['values'] = ["Устройства не найдены"]
+            self.output_combo.current(0)
+
+    # ИСПРАВЛЕНИЕ: Динамическая смена настроек "на лету"
+    def on_lang_changed(self, event=None):
+        self.target_lang_code = SUPPORTED_LANGUAGES[self.lang_var.get()]
+        if self.stream_client and self.stream_client.is_running:
+            self.chunk_queue.put({"action": "set_lang", "lang": self.target_lang_code})
+
+    def on_voice_changed(self, event=None):
+        self.target_voice_code = SUPPORTED_VOICES[self.voice_var.get()]
+        if self.stream_client and self.stream_client.is_running:
+            self.chunk_queue.put({"action": "set_voice", "voice": self.target_voice_code})
 
     def toggle_capture(self):
         if not self.is_capturing.is_set():
@@ -86,12 +109,39 @@ class TranslatorApp:
                 return
 
             self.is_capturing.set()
+
+            # Обновляем очереди перед стартом
+            self.chunk_queue = queue.Queue()
+            self.playback_queue = queue.Queue()
+
+            output_name = self.output_var.get()
+            output_id = next((d["id"] for d in self.output_devices if d["name"] == output_name), None)
+
+            self.stream_player = StreamingPlayer(self.playback_queue, output_device_id=output_id)
+            self.stream_client = TranslationStreamClient(
+                uri=SERVER_URL,
+                target_lang=self.target_lang_code,
+                target_voice=self.target_voice_code,
+                chunk_queue=self.chunk_queue,
+                playback_queue=self.playback_queue
+            )
+
+            self.stream_player.start()
+            self.stream_client.start()
+
             self.capture_btn.config(text="⏹ Остановить")
-            self.status_label.config(text=f"Перехват {selected_proc_name}...", foreground="orange")
+            self.status_label.config(text=f"Слушаю {selected_proc_name} (Streaming)...", foreground="orange")
+
             threading.Thread(target=self.capture_worker, args=(target_pid,), daemon=True).start()
         else:
             self.is_capturing.clear()
-            self.capture_btn.config(text="▶ Начать перевод")
+
+            if self.stream_client:
+                self.stream_client.stop()
+            if self.stream_player:
+                self.stream_player.stop()
+
+            self.capture_btn.config(text="▶ Начать реалтайм перевод")
             self.status_label.config(text="Остановлено", foreground="green")
 
     def capture_worker(self, target_pid):
@@ -104,28 +154,7 @@ class TranslatorApp:
             print(f"Ошибка захвата: {e}")
             self.is_capturing.clear()
             self.root.after(0, lambda: self.status_label.config(text="Ошибка захвата", foreground="red"))
-            self.root.after(0, lambda: self.capture_btn.config(text="▶ Начать перевод"))
-
-    def sending_worker(self):
-        while True:
-            chunk = self.chunk_queue.get()
-            translated_bytes = translate_chunk(chunk, self.target_lang_code)
-            if translated_bytes:
-                self.playback_queue.put(translated_bytes)
-            self.chunk_queue.task_done()
-
-    def playback_worker(self):
-        while True:
-            audio_bytes = self.playback_queue.get()
-            output_name = self.output_var.get()
-            output_id = next((d["id"] for d in self.output_devices if d["name"] == output_name), None)
-
-            try:
-                play_translated_audio(audio_bytes, output_device_id=output_id)
-            except Exception as e:
-                print(f"Ошибка плеера: {e}")
-            finally:
-                self.playback_queue.task_done()
+            self.root.after(0, lambda: self.capture_btn.config(text="▶ Начать реалтайм перевод"))
 
 if __name__ == "__main__":
     root = tk.Tk()
