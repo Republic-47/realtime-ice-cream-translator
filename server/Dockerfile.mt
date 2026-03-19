@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir fastapi uvicorn websockets huggingface_hub
 ENV HF_HOME=/models
 
 # Скачиваем веса LLM на этапе сборки образа (весит около 3.5 ГБ)
-RUN python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-0.6B')"
+RUN python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-1.7B')"
 
 WORKDIR /workspace
 COPY mt_server.py /workspace/mt_server.py

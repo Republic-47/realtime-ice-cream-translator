@@ -91,7 +91,6 @@ async def asr_stream_endpoint(websocket: WebSocket):
                         )
                         previous_text = ""
                     elif data.get("action") in ["set_lang", "set_voice"]:
-                        # Прокидываем обе настройки дальше по пайплайну
                         await mt_ws.send(json.dumps(data))
 
     except WebSocketDisconnect:
