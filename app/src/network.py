@@ -7,7 +7,6 @@ import websockets
 from src.config import SERVER_URL, SAMPLE_RATE
 
 class TranslationStreamClient:
-    # Как ты и просил, без target_voice
     def __init__(self, uri, target_lang, chunk_queue, playback_queue):
         base_uri = uri.replace("http://", "ws://").replace("https://", "wss://")
         if base_uri.endswith("/translate"):
@@ -36,18 +35,10 @@ class TranslationStreamClient:
 
     async def _run(self):
         try:
-            # ИСПРАВЛЕНИЕ: Вернули таймауты соединения для стабильности!
-            async with websockets.connect(
-                self.uri,
-                open_timeout=60,
-                ping_timeout=120,
-                ping_interval=20
-            ) as websocket:
+            async with websockets.connect(self.uri) as websocket:
                 print("🔗 Подключено к стриминг-серверу перевода.")
 
                 await websocket.send(b'\x00')
-
-                # Только язык, никакого голоса
                 await websocket.send(json.dumps({"action": "set_lang", "lang": self.target_lang}))
 
                 task_rx = asyncio.create_task(self._receive_handler(websocket))

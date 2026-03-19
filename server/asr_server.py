@@ -1,4 +1,4 @@
-import os, io, json, asyncio
+import os, io, json, asyncio, base64
 import numpy as np
 import soundfile as sf
 import websockets
@@ -28,8 +28,6 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
-
-# Адрес следующего звена в цепочке
 MT_WS_URL = os.getenv("MT_WS_URL", "ws://mt_service:8002/mt_stream")
 
 @app.websocket("/translate_stream")
@@ -37,7 +35,6 @@ async def asr_stream_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         async with websockets.connect(MT_WS_URL) as mt_ws:
-            # Задача: ловить готовое аудио от TTS (через MT) и отдавать клиенту
             async def forward_audio():
                 try:
                     while True:
@@ -49,15 +46,14 @@ async def asr_stream_endpoint(websocket: WebSocket):
 
             asyncio.create_task(forward_audio())
 
-            # 1. Прокидываем prompt_wav от клиента дальше по трубе
             prompt_bytes = await websocket.receive_bytes()
             await mt_ws.send(prompt_bytes)
 
-            # 2. Инициализируем стейт ASR
             asr_state = asr_model.init_streaming_state(
                 unfixed_chunk_num=2, unfixed_token_num=5, chunk_size_sec=2.0
             )
             previous_text = ""
+            phrase_audio_frames = []
 
             while True:
                 msg = await websocket.receive()
@@ -66,12 +62,10 @@ async def asr_stream_endpoint(websocket: WebSocket):
                     with io.BytesIO(raw_audio) as f:
                         wav, sr = sf.read(f, dtype="float32", always_2d=False)
 
+                    phrase_audio_frames.append(wav)
+
                     await asyncio.to_thread(asr_model.streaming_transcribe, wav, asr_state)
 
-                    # Передаём абобу
-                    await mt_ws.send(raw_audio)
-
-                    # Ловим дельту (новые слова) и кидаем в переводчик
                     current_text = asr_state.text
                     delta = current_text[len(previous_text):].strip()
                     if delta:
@@ -87,13 +81,25 @@ async def asr_stream_endpoint(websocket: WebSocket):
                         if final_delta:
                             await mt_ws.send(json.dumps({"action": "translate_partial", "text": final_delta}))
 
-                        await mt_ws.send(json.dumps({"event": "phrase_end"}))
+                        ref_audio_b64 = ""
+                        if phrase_audio_frames:
+                            full_wav = np.concatenate(phrase_audio_frames)
+                            byte_io = io.BytesIO()
+                            sf.write(byte_io, full_wav, 16000, format="WAV", subtype="PCM_16")
+                            ref_audio_b64 = base64.b64encode(byte_io.getvalue()).decode('utf-8')
+
+                        await mt_ws.send(json.dumps({
+                            "event": "phrase_end",
+                            "ref_audio_b64": ref_audio_b64
+                        }))
 
                         asr_state = asr_model.init_streaming_state(
                             unfixed_chunk_num=2, unfixed_token_num=5, chunk_size_sec=2.0
                         )
                         previous_text = ""
-                    elif data.get("action") == "set_lang":
+                        phrase_audio_frames = []
+
+                    elif data.get("action") in ["set_lang", "set_voice"]:
                         await mt_ws.send(json.dumps(data))
 
     except WebSocketDisconnect:

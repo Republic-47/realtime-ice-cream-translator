@@ -14,6 +14,7 @@ services:
               count: all
               capabilities: [gpu, compute, utility]
     environment:
+      - PYTHONUNBUFFERED=1
       - MT_WS_URL=ws://mt_service:8002/mt_stream
       - TOKENIZERS_PARALLELISM=true
       - OMP_NUM_THREADS=4
@@ -38,6 +39,7 @@ services:
               count: all
               capabilities: [gpu, compute, utility]
     environment:
+      - PYTHONUNBUFFERED=1
       - TTS_WS_URL=ws://tts_service:8001/tts_stream
       - TOKENIZERS_PARALLELISM=true
       - OMP_NUM_THREADS=4
@@ -62,6 +64,7 @@ services:
               count: all
               capabilities: [gpu, compute, utility]
     environment:
+      - PYTHONUNBUFFERED=1
       - OMP_NUM_THREADS=4
     ports:
       - "8001:8001"

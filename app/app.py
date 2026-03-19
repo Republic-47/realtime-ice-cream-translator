@@ -6,14 +6,13 @@ import queue
 from src.audio_input import capture_and_chunk, get_audio_processes
 from src.audio_output import StreamingPlayer, get_output_devices
 from src.network import TranslationStreamClient
-# УБРАЛИ SUPPORTED_VOICES отсюда
 from src.config import SUPPORTED_LANGUAGES, SERVER_URL
 
 class TranslatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Ice Cream Translator (Voice Clone)")
-        self.root.geometry("450x320") # Сделали окно чуть меньше
+        self.root.geometry("450x320") # Уменьшили высоту
 
         self.is_capturing = threading.Event()
         self.target_lang_code = "Russian"
@@ -56,8 +55,6 @@ class TranslatorApp:
         self.lang_combo.pack(fill=tk.X, pady=(0, 20))
         self.lang_combo.bind("<<ComboboxSelected>>", self.on_lang_changed)
 
-        # ПОЛНОСТЬЮ УДАЛИЛИ БЛОК ВЫБОРА ГОЛОСА
-
         self.capture_btn = ttk.Button(main_frame, text="▶ Начать реалтайм перевод", command=self.toggle_capture)
         self.capture_btn.pack(fill=tk.X, pady=(0, 15), ipady=10)
 
@@ -86,8 +83,6 @@ class TranslatorApp:
         if self.stream_client and self.stream_client.is_running:
             self.chunk_queue.put({"action": "set_lang", "lang": self.target_lang_code})
 
-    # УДАЛИЛИ on_voice_changed
-
     def toggle_capture(self):
         if not self.is_capturing.is_set():
             selected_proc_name = self.proc_var.get()
@@ -98,15 +93,14 @@ class TranslatorApp:
                 return
 
             self.is_capturing.set()
+
             self.chunk_queue = queue.Queue()
             self.playback_queue = queue.Queue()
 
             output_name = self.output_var.get()
             output_id = next((d["id"] for d in self.output_devices if d["name"] == output_name), None)
 
-            self.stream_player = StreamingPlayer(self.playback_queue, output_device_id=output_id)
-
-            # БОЛЬШЕ НЕ ПЕРЕДАЕМ target_voice
+            self.stream_player = StreamingPlayer(self.playback_queue, output_device_id=output_id, target_pid=target_pid)
             self.stream_client = TranslationStreamClient(
                 uri=SERVER_URL,
                 target_lang=self.target_lang_code,
