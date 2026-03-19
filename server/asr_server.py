@@ -68,6 +68,9 @@ async def asr_stream_endpoint(websocket: WebSocket):
 
                     await asyncio.to_thread(asr_model.streaming_transcribe, wav, asr_state)
 
+                    # Передаём абобу
+                    await mt_ws.send(raw_audio)
+
                     # Ловим дельту (новые слова) и кидаем в переводчик
                     current_text = asr_state.text
                     delta = current_text[len(previous_text):].strip()
@@ -90,7 +93,7 @@ async def asr_stream_endpoint(websocket: WebSocket):
                             unfixed_chunk_num=2, unfixed_token_num=5, chunk_size_sec=2.0
                         )
                         previous_text = ""
-                    elif data.get("action") in ["set_lang", "set_voice"]:
+                    elif data.get("action") == "set_lang":
                         await mt_ws.send(json.dumps(data))
 
     except WebSocketDisconnect:

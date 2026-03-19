@@ -7,14 +7,14 @@ import websockets
 from src.config import SERVER_URL, SAMPLE_RATE
 
 class TranslationStreamClient:
-    def __init__(self, uri, target_lang, target_voice, chunk_queue, playback_queue):
+    # УБРАЛИ target_voice из аргументов
+    def __init__(self, uri, target_lang, chunk_queue, playback_queue):
         base_uri = uri.replace("http://", "ws://").replace("https://", "wss://")
         if base_uri.endswith("/translate"):
             base_uri = base_uri.replace("/translate", "/translate_stream")
 
         self.uri = base_uri
         self.target_lang = target_lang
-        self.target_voice = target_voice
         self.chunk_queue = chunk_queue
         self.playback_queue = playback_queue
 
@@ -36,13 +36,18 @@ class TranslationStreamClient:
 
     async def _run(self):
         try:
-            async with websockets.connect(self.uri) as websocket:
+            # Даем серверам до 60 секунд на установку всей цепочки вебсокетов
+            async with websockets.connect(
+                self.uri,
+                open_timeout=60,
+                ping_timeout=120,
+                ping_interval=20
+            ) as websocket:
                 print("🔗 Подключено к стриминг-серверу перевода.")
 
                 await websocket.send(b'\x00')
 
                 await websocket.send(json.dumps({"action": "set_lang", "lang": self.target_lang}))
-                await websocket.send(json.dumps({"action": "set_voice", "voice": self.target_voice}))
 
                 task_rx = asyncio.create_task(self._receive_handler(websocket))
                 task_tx = asyncio.create_task(self._send_handler(websocket))
@@ -70,7 +75,6 @@ class TranslationStreamClient:
                 if item is None:
                     break
 
-                # ИСПРАВЛЕНИЕ: Отправляем любые JSON-события (смена языка, голоса, конец фразы)
                 if isinstance(item, dict):
                     await websocket.send(json.dumps(item))
                 else:

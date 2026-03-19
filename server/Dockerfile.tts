@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir fastapi uvicorn websockets soundfile huggingface_
 ENV HF_HOME=/models
 
 # Скачиваем веса 0.6B модели Qwen3-TTS
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice')"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-0.6B-Base')"
 
 WORKDIR /workspace
 COPY tts_server.py /workspace/tts_server.py

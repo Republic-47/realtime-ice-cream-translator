@@ -1,34 +1,64 @@
-import os, json, uuid, asyncio
+import os, json, asyncio
 import websockets
+import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
-from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-os.environ["VLLM_USE_V1"] = "0"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-vllm_engine = None
-mt_tokenizer = None
+model = None
+tokenizer = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global vllm_engine, mt_tokenizer
-    print("🚀 Подъем MT Server (Переводчик)...")
+    global model, tokenizer
+    print("🚀 Подъем MT Server (Чистый PyTorch/Transformers)...")
     model_id = "Qwen/Qwen3-1.7B"
-    engine_args = AsyncEngineArgs(
-        model=model_id,
-        gpu_memory_utilization=0.25,
-        max_model_len=512, # Экономим память
-        enforce_eager=True,
-        dtype="bfloat16"
-    )
-    vllm_engine = AsyncLLMEngine.from_engine_args(engine_args)
-    mt_tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
+    # Загружаем токенизатор
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
+    # Загружаем модель напрямую в видеокарту без VLLM-оберток
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        device_map="cuda",
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True
+    ).eval() # Обязательно переводим в режим инференса
+
+    print("✅ Модель перевода успешно загружена в GPU!")
     yield
 
 app = FastAPI(lifespan=lifespan)
 TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://tts_service:8001/tts_stream")
+
+# Синхронная функция генерации, которую мы будем запускать в отдельном потоке
+def generate_translation(text: str, target_lang: str) -> str:
+    system_prompt = f"You are a strict and professional translator. /no_think\nTranslate the user's text to {target_lang}. Output ONLY the final translation."
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text}
+    ]
+
+    # Готовим промпт
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    # Генерируем перевод
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=150,
+            temperature=0.01,
+            do_sample=False, # Жёсткий детерминизм для перевода
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    # Отрезаем сам промпт от ответа, оставляем только сгенерированный текст
+    input_length = inputs.input_ids.shape[1]
+    generated_tokens = outputs[0][input_length:]
+    final_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+    return final_text.strip()
 
 @app.websocket("/mt_stream")
 async def mt_stream_endpoint(websocket: WebSocket):
@@ -46,48 +76,50 @@ async def mt_stream_endpoint(websocket: WebSocket):
 
             asyncio.create_task(forward_audio())
 
+            # Прокидываем самый первый "холостой" байт инициализации
             prompt_bytes = await websocket.receive_bytes()
             await tts_ws.send(prompt_bytes)
 
             source_buffer = ""
             target_lang = "russian"
 
-            async def run_translation(current_source):
-                if not current_source.strip(): return
-
-                system_prompt = f"You are a strict and professional translator. /no_think\nTranslate the user's text to {target_lang}. Output ONLY the final translation."
-                messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": current_source}]
-                prompt = mt_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-
-                sampling_params = SamplingParams(temperature=0.01, max_tokens=150)
-                results_generator = vllm_engine.generate(prompt, sampling_params, str(uuid.uuid4()))
-
-                final_text = ""
-                async for request_output in results_generator:
-                    final_text = request_output.outputs[0].text
-
-                # Отправляем весь переведенный кусок разом
-                if final_text.strip():
-                    await tts_ws.send(json.dumps({"action": "synthesize", "text": final_text.strip()}))
-
             while True:
-                msg = await websocket.receive_text()
-                data = json.loads(msg)
+                msg = await websocket.receive()
 
-                if data.get("action") == "translate_partial":
-                    # Просто копим распознанный текст, НЕ переводим огрызки!
-                    new_text = data.get("text", "")
-                    source_buffer += " " + new_text
+                if "bytes" in msg:
+                    await tts_ws.send(msg["bytes"])
 
-                elif data.get("event") == "phrase_end":
-                    # Пауза в речи -> Идеальный момент для точного перевода всей фразы
-                    if source_buffer.strip():
-                        print(f"🧠 Перевожу фразу: {source_buffer.strip()}")
-                        await run_translation(source_buffer.strip())
-                    source_buffer = "" # Очищаем буфер
+                elif "text" in msg:
+                    data = json.loads(msg["text"])
 
-                elif data.get("action") in ["set_lang", "set_voice"]:
-                    await tts_ws.send(json.dumps(data))
+                    if data.get("action") == "translate_partial":
+                        new_text = data.get("text", "")
+                        source_buffer += " " + new_text
+
+                    elif data.get("event") == "phrase_end":
+                        text_to_translate = source_buffer.strip()
+                        if text_to_translate:
+                            print(f"🧠 Перевожу фразу: {text_to_translate}")
+
+                            # Запускаем тяжелую ML-задачу в фоновом потоке, чтобы вебсокет продолжал летать
+                            async def run_and_send(txt, lang):
+                                try:
+                                    final_text = await asyncio.to_thread(generate_translation, txt, lang)
+                                    print(f"✅ Перевод завершен: {final_text}")
+                                    if final_text:
+                                        await tts_ws.send(json.dumps({"action": "synthesize", "text": final_text}))
+                                except Exception as e:
+                                    print(f"❌ Ошибка при генерации перевода: {e}")
+
+                            asyncio.create_task(run_and_send(text_to_translate, target_lang))
+
+                        source_buffer = "" # Очищаем буфер
+
+                    elif data.get("action") == "set_lang":
+                        target_lang = data.get("lang", "russian")
+                        await tts_ws.send(json.dumps(data))
 
     except WebSocketDisconnect:
         print("🔌 ASR отключился от MT.")
+    except Exception as e:
+        print(f"❌ Непредвиденная ошибка в MT: {e}")
