@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir fastapi uvicorn websockets soundfile huggingface_
 ENV HF_HOME=/models
 
 # Скачиваем веса ASR-модели на этапе сборки образа (весит около 1.5 ГБ)
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-ASR-0.6B')"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-ASR-1.7B')"
 
 WORKDIR /workspace
 COPY asr_server.py /workspace/asr_server.py

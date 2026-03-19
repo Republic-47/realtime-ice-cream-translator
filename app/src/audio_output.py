@@ -78,7 +78,6 @@ class StreamingPlayer:
                 try:
                     data, fs = sf.read(io.BytesIO(chunk_bytes))
                     data = np.clip(data * 4.0, -1.0, 1.0)
-
                     if player is None:
                         player = speaker.player(samplerate=fs)
                         player.__enter__()

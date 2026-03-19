@@ -9,3 +9,4 @@ pycaw
 comtypes
 packaging
 websockets
+audiotsm

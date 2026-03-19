@@ -56,21 +56,48 @@ async def mt_stream_endpoint(websocket: WebSocket):
                 try:
                     if not current_source.strip(): return
 
-                    system_prompt = f"You are a strict and professional translator. /no_think\nTranslate the user's text to {target_lang}. Output ONLY the final translation."
-                    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": current_source}]
-                    prompt = mt_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+                    # Максимально жесткий промпт с четкими правилами
+                    system_prompt = (
+                        f"/no_think You are an expert real-time voice translator. Translate the text to {target_lang}.\n"
+                        "STRICT RULES:\n"
+                        "1. Translate the contextual meaning naturally, avoiding rigid literal translation.\n"
+                        "2. Smooth out spoken artifacts, stutters, and obvious speech recognition errors.\n"
+                        "3. OUTPUT ONLY THE TRANSLATION. Do not add explanations, notes, quotes, or conversational filler."
+                    )
 
-                    sampling_params = SamplingParams(temperature=0.01, max_tokens=150)
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Text to translate:\n\n{current_source}"}
+                    ]
+
+                    prompt = mt_tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+
+                    # Настройки специально для маленьких моделей
+                    sampling_params = SamplingParams(
+                        temperature=0.0,          # Жадное декодирование (Greedy). Никаких галлюцинаций.
+                        repetition_penalty=1.05,  # Легкий штраф за повторения (маленькие модели любят зацикливаться).
+                        max_tokens=256,           # Берем с запасом для длинных фраз.
+                        skip_special_tokens=True  # Чтобы в текст не просочились технические теги.
+                    )
+
                     results_generator = vllm_engine.generate(prompt, sampling_params, str(uuid.uuid4()))
 
                     final_text = ""
                     async for request_output in results_generator:
                         final_text = request_output.outputs[0].text
 
-                    if final_text.strip():
+                    # Дополнительная очистка от мусора (если модель всё же добавит кавычки)
+                    cleaned_text = final_text.strip().strip('"').strip("'")
+
+                    if cleaned_text:
                         await tts_ws.send(json.dumps({
                             "action": "synthesize",
-                            "text": final_text.strip(),
+                            "text": cleaned_text,
                             "ref_text": current_source,
                             "ref_audio_b64": ref_audio_b64
                         }))
@@ -94,6 +121,10 @@ async def mt_stream_endpoint(websocket: WebSocket):
                     source_buffer = ""
 
                 elif data.get("action") in ["set_lang", "set_voice"]:
+                    if data.get("action") == "set_lang":
+                        target_lang = data.get("lang")
+                        print(f"🌐 Язык перевода изменен на: {target_lang}")
+
                     await tts_ws.send(json.dumps(data))
 
     except WebSocketDisconnect:
